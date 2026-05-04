@@ -1,0 +1,12 @@
+{
+  "printer": {
+    "ip": "192.168.1.100",
+    "port": 9100,
+    "width_px": 384,
+    "timeout": 5
+  },
+  "defaults": {
+    "cut_after_print": true,
+    "dither": true
+  }
+}
