@@ -19,6 +19,48 @@ The server accepts tool calls over stdio, renders the content to a 384px-wide 1-
 
 ## Tools
 
+### print_markdown
+
+Render and print a Markdown document. Supports headings (h1-h6), paragraphs,
+ordered/unordered lists, GitHub task lists (`- [x] / - [ ]`), tables,
+fenced code blocks, blockquotes, and thematic breaks. In `mode="confirm"` the
+browser exposes a textarea so you can edit the Markdown and re-render before
+committing to paper.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `content` | str | required | Markdown source |
+| `cut` | bool | `true` | Cut paper after printing |
+| `mode` | str | `"print"` | `"print"`, `"preview"`, or `"confirm"` |
+
+### print_blocks
+
+Print a composed document from typed block specs, as a single atomic ESC/POS
+job (one cut at the end). Each block is a dict with a `type` field. Supported
+types: `title`, `paragraph`, `separator`, `spacer`, `bullet`, `checklist`,
+`keyvalue`, `table`, `code`, `box`.
+
+Example:
+
+```json
+[
+  {"type": "title", "text": "Component"},
+  {"type": "keyvalue", "pairs": [
+    ["Part", "NE555"],
+    ["Pkg",  "DIP-8"]
+  ]},
+  {"type": "table",
+   "headers": ["Pin", "Function"],
+   "rows": [["1", "GND"], ["2", "TRIG"], ["3", "OUT"]]}
+]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `blocks` | list[dict] | required | Ordered list of block specs |
+| `cut` | bool | `true` | Cut paper after printing |
+| `mode` | str | `"print"` | `"print"`, `"preview"`, or `"confirm"` |
+
 ### print_text
 
 Print formatted text with ESC/POS styling. Auto-switches to bitmap rendering when content contains non-ASCII characters (accents, CJK, emoji, …) so the preview matches the print exactly.

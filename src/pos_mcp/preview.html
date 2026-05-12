@@ -181,6 +181,13 @@
       </div>
     </div>
 
+    <div id="markdown-controls" style="display:none">
+      <div class="field">
+        <label>Markdown source</label>
+        <textarea id="f-md" style="min-height: 240px; font-family: monospace; font-size: 12px;"></textarea>
+      </div>
+    </div>
+
     <button id="btn-refresh" class="btn-refresh">Apply changes</button>
     <button id="btn-print" class="btn-print">Print</button>
     <button id="btn-cancel" class="btn-cancel">Cancel</button>
@@ -239,6 +246,8 @@ function renderJob(job) {
     job.kind === "text" ? "block" : "none";
   document.getElementById("image-controls").style.display =
     job.kind === "image" ? "block" : "none";
+  document.getElementById("markdown-controls").style.display =
+    job.kind === "markdown" ? "block" : "none";
 
   if (job.kind === "text") {
     document.getElementById("f-content").value = job.params.content || "";
@@ -247,6 +256,8 @@ function renderJob(job) {
     document.getElementById("f-bold").checked = !!job.params.bold;
   } else if (job.kind === "image") {
     document.getElementById("f-dither").checked = job.params.dither !== false;
+  } else if (job.kind === "markdown") {
+    document.getElementById("f-md").value = job.params.content || "";
   }
 
   const editable = job.editable && !job.decision;
@@ -284,6 +295,9 @@ function collectEdits() {
   }
   if (currentJob.kind === "image") {
     return { dither: document.getElementById("f-dither").checked };
+  }
+  if (currentJob.kind === "markdown") {
+    return { content: document.getElementById("f-md").value };
   }
   return {};
 }

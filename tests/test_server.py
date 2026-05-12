@@ -18,17 +18,20 @@ def config_file(tmp_path):
     return path
 
 
-def test_server_has_four_tools(config_file):
+def test_server_has_all_tools(config_file):
     with patch("pos_mcp.server.CONFIG_PATH", config_file):
         from pos_mcp.server import mcp
-        # Access internal tool registry
         tools = mcp._tool_manager._tools
         tool_names = set(tools.keys())
-        assert "print_text" in tool_names
-        assert "print_image" in tool_names
-        assert "print_diagram" in tool_names
-        assert "print_barcode" in tool_names
-        assert len(tool_names) == 4
+        expected = {
+            "print_text",
+            "print_image",
+            "print_diagram",
+            "print_barcode",
+            "print_blocks",
+            "print_markdown",
+        }
+        assert expected <= tool_names
 
 
 def test_print_text_preview(config_file):

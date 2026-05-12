@@ -18,6 +18,8 @@ from pos_mcp.renderer import (
 )
 from pos_mcp.printer import send_to_printer, preview_image
 from pos_mcp.jobstore import get_store
+from pos_mcp.blocks import RenderContext, block_from_dict, compose
+from pos_mcp.markdown_render import markdown_to_blocks
 
 log = logging.getLogger(__name__)
 
@@ -306,6 +308,106 @@ def print_barcode(
         barcode_label=label,
         cut=cut,
     )
+
+
+def _build_ctx(cfg: PrinterConfig) -> RenderContext:
+    return RenderContext(
+        width_px=cfg.width_px,
+        custom_chain=cfg.fonts.fallback_chain or None,
+    )
+
+
+@mcp.tool()
+def print_blocks(
+    blocks: list[dict],
+    cut: bool = True,
+    mode: Literal["print", "preview", "confirm"] = "print",
+) -> str | list:
+    """Print a composed document from typed block specs, atomically (single cut).
+
+    Each entry in `blocks` is a dict with a `type` field. Supported types:
+    `title`, `paragraph`, `separator`, `spacer`, `bullet`, `checklist`,
+    `keyvalue`, `table`, `code`, `box`.
+
+    Example:
+        blocks=[
+            {"type": "title", "text": "Shopping list"},
+            {"type": "checklist", "items": [
+                {"checked": false, "text": "Milk"},
+                {"checked": true, "text": "Bread"}
+            ]}
+        ]
+
+    Args:
+        blocks: Ordered list of block specs.
+        cut: Cut paper after printing.
+        mode: "print" / "preview" / "confirm" — see print_text for details.
+    """
+    cfg = _load_cfg()
+    effective_mode = _normalize_mode(mode, False)
+    ctx = _build_ctx(cfg)
+
+    try:
+        block_objs = [block_from_dict(spec) for spec in blocks]
+    except ValueError as e:
+        return f"Invalid block spec: {e}"
+
+    img = compose(block_objs, ctx)
+
+    if effective_mode == "preview":
+        return _image_content(img)
+
+    if effective_mode == "confirm":
+        decision, job = _await_confirmation(
+            "blocks", {"blocks": blocks}, img, rerender=None, cfg=cfg
+        )
+        if decision != "print":
+            return f"Cancelled by user ({decision})"
+        return send_to_printer(cfg, image=job.image, cut=cut)
+
+    return send_to_printer(cfg, image=img, cut=cut)
+
+
+@mcp.tool()
+def print_markdown(
+    content: str,
+    cut: bool = True,
+    mode: Literal["print", "preview", "confirm"] = "print",
+) -> str | list:
+    """Print Markdown content. Supports headings, paragraphs, lists, GitHub task
+    lists (`- [x]`), tables, code blocks, blockquotes, horizontal rules.
+
+    In `mode="confirm"` the browser exposes a textarea so the user can edit the
+    Markdown and re-render before printing.
+
+    Args:
+        content: Markdown source.
+        cut: Cut paper after printing.
+        mode: "print" / "preview" / "confirm".
+    """
+    cfg = _load_cfg()
+    effective_mode = _normalize_mode(mode, False)
+    ctx = _build_ctx(cfg)
+
+    def render_from(params: dict) -> object:
+        src = params.get("content", content)
+        blocks = markdown_to_blocks(src)
+        return compose(blocks, ctx)
+
+    img = render_from({"content": content})
+
+    if effective_mode == "preview":
+        return _image_content(img)
+
+    if effective_mode == "confirm":
+        decision, job = _await_confirmation(
+            "markdown", {"content": content}, img, rerender=render_from, cfg=cfg
+        )
+        if decision != "print":
+            return f"Cancelled by user ({decision})"
+        return send_to_printer(cfg, image=job.image, cut=cut)
+
+    return send_to_printer(cfg, image=img, cut=cut)
 
 
 def _render_barcode_image(data: str, type: str, width_px: int):
