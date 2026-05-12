@@ -66,6 +66,10 @@ def build_app() -> FastAPI:
             return HTMLResponse("<h1>preview.html missing</h1>", status_code=500)
         return HTMLResponse(_UI_PATH.read_text(encoding="utf-8"))
 
+    @app.get("/healthz")
+    async def healthz() -> JSONResponse:
+        return JSONResponse({"status": "ok"})
+
     @app.get("/api/jobs/latest")
     async def latest() -> JSONResponse:
         job = store.latest()

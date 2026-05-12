@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -431,12 +432,39 @@ def _render_barcode_image(data: str, type: str, width_px: int):
     return img.resize((width_px, new_h)).convert("1")
 
 
+_VALID_TRANSPORTS = ("stdio", "sse", "streamable-http")
+
+
+def _select_transport() -> tuple[str, str, int]:
+    """Pick MCP transport + bind from env. Returns (transport, host, port)."""
+    transport = os.environ.get("POS_MCP_TRANSPORT", "stdio").lower()
+    if transport not in _VALID_TRANSPORTS:
+        log.warning("Unknown POS_MCP_TRANSPORT=%r — falling back to stdio", transport)
+        transport = "stdio"
+    host = os.environ.get("POS_MCP_MCP_HOST", "127.0.0.1")
+    try:
+        port = int(os.environ.get("POS_MCP_MCP_PORT", "3333"))
+    except ValueError:
+        port = 3333
+    return transport, host, port
+
+
 def main():
     global CONFIG_PATH
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=os.environ.get("POS_MCP_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
     if CONFIG_PATH is None:
-        CONFIG_PATH = Path(__file__).parent.parent.parent / "pos-mcp.json"
-    mcp.run(transport="stdio")
+        env_path = os.environ.get("POS_MCP_CONFIG")
+        CONFIG_PATH = Path(env_path) if env_path else Path(__file__).parent.parent.parent / "pos-mcp.json"
+
+    transport, host, port = _select_transport()
+    if transport != "stdio":
+        mcp.settings.host = host
+        mcp.settings.port = port
+        log.info("Starting MCP server on %s://%s:%s", transport, host, port)
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

@@ -212,6 +212,70 @@ Copy and edit `pos-mcp.json` in the project root:
 
 The config file path can also be overridden via the `POS_MCP_CONFIG` environment variable.
 
+## Docker deployment
+
+The repository ships with a `Dockerfile` (multi-stage, python:3.12-slim base)
+and a `docker-compose.yml` reference setup. Fonts (Noto + DejaVu, including
+CJK and monochrome emoji) and the `graphviz` binary are baked into the image.
+
+### Quick start
+
+```bash
+docker compose up --build
+```
+
+This exposes:
+
+- `http://localhost:7878` — browser preview UI
+- `http://localhost:7878/healthz` — health endpoint (used by the compose `healthcheck`)
+- `http://localhost:3333/mcp` — MCP streamable-http endpoint (when `POS_MCP_TRANSPORT=streamable-http`)
+
+### Transports
+
+The MCP server picks its transport from `POS_MCP_TRANSPORT`:
+
+| Value | Use case |
+|-------|----------|
+| `stdio` (default) | Local subprocess — run as `docker run -i pos-mcp` from the MCP client. |
+| `sse` | Server-Sent Events transport on `POS_MCP_MCP_HOST:POS_MCP_MCP_PORT/sse`. |
+| `streamable-http` | Streaming HTTP transport on `POS_MCP_MCP_HOST:POS_MCP_MCP_PORT/mcp`. |
+
+For SSE / HTTP, set `POS_MCP_MCP_HOST=0.0.0.0` so the port is reachable from outside the container.
+
+### Environment variables
+
+All variables are optional — they override the corresponding fields in `pos-mcp.json`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POS_MCP_CONFIG` | `/app/pos-mcp.json` | Path to the JSON config file |
+| `POS_MCP_PRINTER_IP` | from config | Printer IP address |
+| `POS_MCP_PRINTER_PORT` | `9100` | Printer TCP port |
+| `POS_MCP_PRINTER_WIDTH` | `384` | Paper width in pixels |
+| `POS_MCP_PRINTER_TIMEOUT` | `5` | Printer socket timeout (s) |
+| `POS_MCP_PREVIEW_ENABLED` | `true` | Start the preview sidecar |
+| `POS_MCP_PREVIEW_HOST` | `127.0.0.1` | Preview bind host (use `0.0.0.0` in Docker) |
+| `POS_MCP_PREVIEW_PORT` | `7878` | Preview HTTP port |
+| `POS_MCP_PREVIEW_AUTO_OPEN` | `true` | Try to auto-open the browser on first job |
+| `POS_MCP_PREVIEW_TIMEOUT` | `120` | Seconds to wait for user approval in `mode="confirm"` |
+| `POS_MCP_TRANSPORT` | `stdio` | MCP transport: `stdio` / `sse` / `streamable-http` |
+| `POS_MCP_MCP_HOST` | `127.0.0.1` | MCP bind host (SSE/HTTP only) |
+| `POS_MCP_MCP_PORT` | `3333` | MCP bind port (SSE/HTTP only) |
+| `POS_MCP_HEADLESS` | auto-detected | Force-disable browser auto-open (no `DISPLAY`) |
+| `POS_MCP_LOG_LEVEL` | `INFO` | Python log level |
+
+The container sets `POS_MCP_HEADLESS=1` by default so `webbrowser.open()` is never attempted inside the image — the preview is reached from your host browser via the mapped port.
+
+### Build manually
+
+```bash
+docker build -t pos-mcp .
+docker run --rm -p 7878:7878 \
+    -e POS_MCP_PRINTER_IP=192.168.1.100 \
+    -e POS_MCP_PREVIEW_HOST=0.0.0.0 \
+    pos-mcp
+```
+
 ## Client setup
 
 ### Claude Desktop

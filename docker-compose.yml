@@ -1,0 +1,47 @@
+services:
+  pos-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pos-mcp:latest
+    container_name: pos-mcp
+    restart: unless-stopped
+
+    environment:
+      # Stampante (sovrascrivono pos-mcp.json se valorizzate)
+      POS_MCP_PRINTER_IP: "192.168.1.100"
+      POS_MCP_PRINTER_PORT: "9100"
+      POS_MCP_PRINTER_WIDTH: "384"
+      POS_MCP_PRINTER_TIMEOUT: "5"
+
+      # Preview HTTP/WebSocket UI
+      POS_MCP_PREVIEW_ENABLED: "true"
+      POS_MCP_PREVIEW_HOST: "0.0.0.0"
+      POS_MCP_PREVIEW_PORT: "7878"
+      POS_MCP_PREVIEW_TIMEOUT: "120"
+
+      # Trasporto MCP: stdio | sse | streamable-http
+      # Per uso via stdio dal client locale rimuovi la riga sotto e usa `docker run -i`.
+      POS_MCP_TRANSPORT: "streamable-http"
+      POS_MCP_MCP_HOST: "0.0.0.0"
+      POS_MCP_MCP_PORT: "3333"
+
+      POS_MCP_LOG_LEVEL: "INFO"
+
+    ports:
+      # Preview UI in the browser
+      - "7878:7878"
+      # MCP HTTP/SSE endpoint (mappa solo se transport != stdio)
+      - "3333:3333"
+
+    volumes:
+      # Mount the config file read-only. Override only the fields you need;
+      # env vars above take precedence over the file values.
+      - ./pos-mcp.json:/app/pos-mcp.json:ro
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7878/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
