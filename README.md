@@ -21,7 +21,7 @@ The server accepts tool calls over stdio, renders the content to a 384px-wide 1-
 
 ### print_text
 
-Print formatted text with ESC/POS styling.
+Print formatted text with ESC/POS styling. Auto-switches to bitmap rendering when content contains non-ASCII characters (accents, CJK, emoji, …) so the preview matches the print exactly.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -30,7 +30,8 @@ Print formatted text with ESC/POS styling.
 | `size` | str | `"normal"` | `"small"`, `"normal"`, or `"large"` |
 | `align` | str | `"left"` | `"left"`, `"center"`, or `"right"` |
 | `cut` | bool | `true` | Cut paper after printing |
-| `preview` | bool | `false` | Return preview image instead of printing |
+| `render` | str | `"auto"` | `"auto"`, `"native"`, or `"bitmap"` |
+| `mode` | str | `"print"` | `"print"`, `"preview"`, or `"confirm"` |
 
 ### print_image
 
@@ -41,7 +42,7 @@ Print a base64-encoded image. Auto-resizes to paper width and converts to 1-bit 
 | `image_base64` | str | required | PNG or JPG image as base64 string |
 | `dither` | bool | `true` | Floyd-Steinberg dithering for 1-bit conversion |
 | `cut` | bool | `true` | Cut paper after printing |
-| `preview` | bool | `false` | Return preview image instead of printing |
+| `mode` | str | `"print"` | `"print"`, `"preview"`, or `"confirm"` |
 
 ### print_diagram
 
@@ -52,7 +53,7 @@ Render and print diagrams from Graphviz DOT code or matplotlib Python code.
 | `code` | str | required | DOT syntax (graphviz) or Python code (matplotlib) |
 | `engine` | str | `"graphviz"` | `"graphviz"` or `"matplotlib"` |
 | `cut` | bool | `true` | Cut paper after printing |
-| `preview` | bool | `false` | Return preview image instead of printing |
+| `mode` | str | `"print"` | `"print"`, `"preview"`, or `"confirm"` |
 
 The matplotlib engine runs code in a restricted sandbox. Only `matplotlib`, `numpy`, and `math` imports are allowed.
 
@@ -66,11 +67,42 @@ Print QR codes or linear barcodes.
 | `type` | str | `"qr"` | `"qr"`, `"ean13"`, `"ean8"`, `"code128"`, `"code39"` |
 | `label` | str | `""` | Text label below the barcode |
 | `cut` | bool | `true` | Cut paper after printing |
-| `preview` | bool | `false` | Return preview image instead of printing |
+| `mode` | str | `"print"` | `"print"`, `"preview"`, or `"confirm"` |
 
-## Preview mode
+## Preview and confirm modes
 
-Every tool supports `preview=true`. Instead of printing, the server renders the output and returns it as an MCP image content block. The LLM client shows the preview inline, letting you iterate before committing to paper.
+Every tool accepts a `mode` parameter:
+
+| Mode | Behavior |
+|------|----------|
+| `"print"` (default) | Render and send to the printer. |
+| `"preview"` | Render and return the bitmap as an MCP image content block. Nothing is sent to the printer. |
+| `"confirm"` | Render, open a browser preview, and block until the user clicks **Print** or **Cancel**. Basic edits (text content, alignment, size, bold, dithering) can be applied in the browser before printing. |
+
+The legacy `preview=True` flag is still accepted for backwards compatibility.
+
+### Browser preview sidecar
+
+When the server starts, an HTTP server runs alongside on `http://127.0.0.1:7878` (configurable). It exposes:
+
+- The preview UI at `/` — a single-page editor showing the exact bitmap that will be printed, with a ruler in mm and inline controls.
+- WebSocket at `/ws` — pushes new previews to the browser as Claude calls tools.
+- JSON API at `/api/jobs/{id}/{confirm,cancel,update}`.
+
+The browser auto-opens at the first job (toggle with `preview.auto_open: false`).
+
+### Text rendering: native vs bitmap
+
+Text content is rendered by one of two paths depending on its characters:
+
+- **Native ESC/POS** (fast, low memory) — used when the entire string is pure ASCII (`< 0x80`).
+- **Bitmap** (full Unicode, emoji, mixed scripts) — used when any non-ASCII character is present, or when `render="bitmap"` is forced.
+
+You can override with the `render` parameter (`"auto"` | `"native"` | `"bitmap"`). When the bitmap path is used the browser preview is pixel-perfect; for the native path the preview is an approximation with matching layout and metrics.
+
+### Font fallback
+
+The renderer discovers system fonts at startup (via `fc-list` on Linux, plus common font directories on macOS/Windows). For each character it picks the first font in the chain that has the glyph, allowing Latin + CJK + Arabic + emoji to coexist on the same line. Add your own family substrings to `fonts.fallback_chain` to override the order.
 
 ## Installation
 
@@ -108,6 +140,16 @@ Copy and edit `pos-mcp.json` in the project root:
   "defaults": {
     "cut_after_print": true,
     "dither": true
+  },
+  "preview": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 7878,
+    "auto_open": true,
+    "confirm_timeout": 120
+  },
+  "fonts": {
+    "fallback_chain": []
   }
 }
 ```
@@ -120,6 +162,13 @@ Copy and edit `pos-mcp.json` in the project root:
 | `printer.timeout` | Connection timeout in seconds |
 | `defaults.cut_after_print` | Default cut behavior |
 | `defaults.dither` | Default dithering for images |
+| `preview.enabled` | Start the browser preview sidecar |
+| `preview.port` | HTTP port for the preview UI |
+| `preview.auto_open` | Auto-launch the browser on the first job |
+| `preview.confirm_timeout` | Seconds the MCP tool waits for user approval |
+| `fonts.fallback_chain` | Custom font-family priority list (substrings); auto-discovered Noto/DejaVu are appended |
+
+The config file path can also be overridden via the `POS_MCP_CONFIG` environment variable.
 
 ## Client setup
 
@@ -170,13 +219,18 @@ cwd: /path/to/pos-mcp
 ```
 pos-mcp/
 ├── src/pos_mcp/
-│   ├── server.py      FastMCP server, 4 tool definitions
-│   ├── renderer.py    Text/DOT/matplotlib/image -> 1-bit PIL.Image
-│   ├── printer.py     ESC/POS via TCP, preview as base64 PNG
-│   └── config.py      JSON config loader, PrinterConfig dataclass
-├── tests/             22 tests (config, renderer, printer, server)
-├── pos-mcp.json       Printer configuration
-└── pyproject.toml     Dependencies and entry point
+│   ├── server.py          FastMCP server, 4 tool definitions, sidecar boot
+│   ├── renderer.py        Text/DOT/matplotlib/image -> 1-bit PIL.Image
+│   ├── fonts.py           Font discovery + per-character Unicode fallback
+│   ├── printer.py         ESC/POS via TCP, preview as base64 PNG
+│   ├── jobstore.py        In-memory job queue for the confirm/approval flow
+│   ├── preview_server.py  FastAPI + WebSocket sidecar
+│   ├── preview.html       Browser preview UI (single file, vanilla JS)
+│   └── config.py          JSON config loader, dataclasses
+├── tests/                 38 tests (config, fonts, renderer, printer,
+│                          jobstore, preview server, server)
+├── pos-mcp.json           Printer + preview + fonts configuration
+└── pyproject.toml         Dependencies and entry point
 ```
 
 ## Running tests

@@ -8,5 +8,15 @@
   "defaults": {
     "cut_after_print": true,
     "dither": true
+  },
+  "preview": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 7878,
+    "auto_open": true,
+    "confirm_timeout": 120
+  },
+  "fonts": {
+    "fallback_chain": []
   }
 }

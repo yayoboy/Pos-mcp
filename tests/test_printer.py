@@ -41,7 +41,9 @@ def test_send_text_to_printer(mock_network_cls):
     )
     assert result == "OK"
     mock_network_cls.assert_called_once_with("192.168.1.100", port=9100, timeout=5)
-    mock_printer.set.assert_called_once_with(align="CENTER", bold=True, width=2, height=2)
+    set_calls = mock_printer.set.call_args_list
+    assert set_calls[0].kwargs == {"align": "CENTER", "bold": True, "width": 2, "height": 2}
+    assert set_calls[-1].kwargs == {"align": "LEFT", "bold": False, "width": 1, "height": 1}
     mock_printer.text.assert_called_once_with("Hello\n")
     mock_printer.cut.assert_called_once()
     mock_printer.close.assert_called_once()

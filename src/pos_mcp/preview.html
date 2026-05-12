@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pos-mcp preview</title>
+<style>
+  :root {
+    --bg: #1c1c1f;
+    --panel: #25252a;
+    --border: #3a3a40;
+    --text: #e6e6ea;
+    --muted: #8a8a94;
+    --accent: #4fc3f7;
+    --danger: #ef5350;
+    --ok: #66bb6a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.4 system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    height: 100vh;
+  }
+  .preview-pane {
+    overflow: auto;
+    padding: 24px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+  }
+  .paper-wrap {
+    background: white;
+    padding: 16px;
+    border-radius: 4px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    min-width: 384px;
+  }
+  #preview-img {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    display: block;
+    width: 384px;
+  }
+  .controls {
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  h1 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 0 0 4px;
+  }
+  .meta {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  label {
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  input, select, textarea {
+    background: #1a1a1d;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 4px;
+    font: inherit;
+  }
+  textarea { min-height: 120px; resize: vertical; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  button {
+    padding: 10px 14px;
+    border: 0;
+    border-radius: 4px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    color: white;
+  }
+  .btn-print { background: var(--ok); }
+  .btn-cancel { background: var(--danger); }
+  .btn-refresh { background: #555; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .empty {
+    color: var(--muted);
+    text-align: center;
+    padding: 40px 20px;
+  }
+  .ruler {
+    position: relative;
+    width: 384px;
+    height: 16px;
+    margin: 0 auto 8px;
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    background: var(--accent);
+    color: #000;
+    margin-left: 6px;
+  }
+  .status-bar {
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    text-align: center;
+  }
+  .status-waiting { background: #3a3a40; color: var(--muted); }
+  .status-confirmed { background: var(--ok); color: white; }
+  .status-cancelled { background: var(--danger); color: white; }
+</style>
+</head>
+<body>
+  <div class="preview-pane">
+    <div>
+      <div class="ruler" id="ruler"></div>
+      <div class="paper-wrap">
+        <div id="empty" class="empty">No job yet. Trigger a tool with mode=confirm.</div>
+        <img id="preview-img" style="display:none">
+      </div>
+    </div>
+  </div>
+  <div class="controls">
+    <h1>Preview <span id="kind-badge" class="badge" style="display:none"></span></h1>
+    <div id="job-meta" class="meta">—</div>
+    <div id="status" class="status-bar status-waiting">Waiting…</div>
+
+    <div id="text-controls" style="display:none">
+      <div class="field">
+        <label>Content</label>
+        <textarea id="f-content"></textarea>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Size</label>
+          <select id="f-size">
+            <option value="small">small</option>
+            <option value="normal" selected>normal</option>
+            <option value="large">large</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Align</label>
+          <select id="f-align">
+            <option value="left" selected>left</option>
+            <option value="center">center</option>
+            <option value="right">right</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" id="f-bold"> Bold</label>
+      </div>
+    </div>
+
+    <div id="image-controls" style="display:none">
+      <div class="field">
+        <label><input type="checkbox" id="f-dither" checked> Dithering (Floyd-Steinberg)</label>
+      </div>
+    </div>
+
+    <button id="btn-refresh" class="btn-refresh">Apply changes</button>
+    <button id="btn-print" class="btn-print">Print</button>
+    <button id="btn-cancel" class="btn-cancel">Cancel</button>
+  </div>
+
+<script>
+let currentJob = null;
+let ws = null;
+
+function renderRuler() {
+  const ruler = document.getElementById("ruler");
+  ruler.innerHTML = "";
+  for (let mm = 0; mm <= 80; mm += 10) {
+    const tick = document.createElement("div");
+    tick.style.position = "absolute";
+    tick.style.left = (mm / 80 * 384) + "px";
+    tick.textContent = mm;
+    ruler.appendChild(tick);
+  }
+}
+
+function setStatus(text, cls) {
+  const el = document.getElementById("status");
+  el.textContent = text;
+  el.className = "status-bar " + cls;
+}
+
+function renderJob(job) {
+  currentJob = job;
+  if (!job) {
+    document.getElementById("empty").style.display = "block";
+    document.getElementById("preview-img").style.display = "none";
+    document.getElementById("kind-badge").style.display = "none";
+    document.getElementById("job-meta").textContent = "—";
+    setStatus("Waiting…", "status-waiting");
+    return;
+  }
+  document.getElementById("empty").style.display = "none";
+  const img = document.getElementById("preview-img");
+  img.src = "data:image/png;base64," + job.png_b64;
+  img.style.display = "block";
+
+  const badge = document.getElementById("kind-badge");
+  badge.textContent = job.kind;
+  badge.style.display = "inline-block";
+
+  document.getElementById("job-meta").textContent =
+    `Job ${job.id} · ${job.kind}` + (job.editable ? "" : " · read-only");
+
+  if (job.decision === "print") setStatus("Confirmed — printing", "status-confirmed");
+  else if (job.decision === "cancel") setStatus("Cancelled", "status-cancelled");
+  else setStatus("Awaiting decision", "status-waiting");
+
+  // populate fields by kind
+  document.getElementById("text-controls").style.display =
+    job.kind === "text" ? "block" : "none";
+  document.getElementById("image-controls").style.display =
+    job.kind === "image" ? "block" : "none";
+
+  if (job.kind === "text") {
+    document.getElementById("f-content").value = job.params.content || "";
+    document.getElementById("f-size").value = job.params.size || "normal";
+    document.getElementById("f-align").value = job.params.align || "left";
+    document.getElementById("f-bold").checked = !!job.params.bold;
+  } else if (job.kind === "image") {
+    document.getElementById("f-dither").checked = job.params.dither !== false;
+  }
+
+  const editable = job.editable && !job.decision;
+  document.getElementById("btn-refresh").disabled = !editable;
+  document.getElementById("btn-print").disabled = !!job.decision;
+  document.getElementById("btn-cancel").disabled = !!job.decision;
+}
+
+async function fetchLatest() {
+  try {
+    const r = await fetch("/api/jobs/latest");
+    const data = await r.json();
+    renderJob(data.job);
+  } catch (e) { console.error(e); }
+}
+
+async function fetchJob(id) {
+  try {
+    const r = await fetch("/api/jobs/" + id);
+    if (!r.ok) return;
+    const data = await r.json();
+    renderJob(data);
+  } catch (e) { console.error(e); }
+}
+
+function collectEdits() {
+  if (!currentJob) return {};
+  if (currentJob.kind === "text") {
+    return {
+      content: document.getElementById("f-content").value,
+      size: document.getElementById("f-size").value,
+      align: document.getElementById("f-align").value,
+      bold: document.getElementById("f-bold").checked,
+    };
+  }
+  if (currentJob.kind === "image") {
+    return { dither: document.getElementById("f-dither").checked };
+  }
+  return {};
+}
+
+document.getElementById("btn-refresh").addEventListener("click", async () => {
+  if (!currentJob) return;
+  await fetch(`/api/jobs/${currentJob.id}/update`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(collectEdits()),
+  });
+});
+
+document.getElementById("btn-print").addEventListener("click", async () => {
+  if (!currentJob) return;
+  await fetch(`/api/jobs/${currentJob.id}/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(collectEdits()),
+  });
+});
+
+document.getElementById("btn-cancel").addEventListener("click", async () => {
+  if (!currentJob) return;
+  await fetch(`/api/jobs/${currentJob.id}/cancel`, { method: "POST" });
+});
+
+function connectWS() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.job_id) fetchJob(msg.job_id);
+  };
+  ws.onclose = () => setTimeout(connectWS, 1500);
+  ws.onerror = () => ws.close();
+}
+
+renderRuler();
+fetchLatest();
+connectWS();
+</script>
+</body>
+</html>

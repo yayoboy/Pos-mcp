@@ -1,29 +1,102 @@
+from __future__ import annotations
+
+import logging
 from pathlib import Path
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ImageContent
+from mcp.types import ImageContent, TextContent
 
 from pos_mcp.config import load_config, PrinterConfig
-from pos_mcp.renderer import render_text, render_dot, render_matplotlib, prepare_image
+from pos_mcp.renderer import (
+    render_text,
+    render_native_preview,
+    render_dot,
+    render_matplotlib,
+    prepare_image,
+    should_use_bitmap,
+)
 from pos_mcp.printer import send_to_printer, preview_image
+from pos_mcp.jobstore import get_store
 
-CONFIG_PATH = Path(__file__).parent.parent.parent / "pos-mcp.json"
+log = logging.getLogger(__name__)
+
+CONFIG_PATH: Path | None = None
+_CFG_CACHE: PrinterConfig | None = None
+_CFG_CACHE_KEY: Path | None = None
+_PREVIEW_STARTED = False
 
 mcp = FastMCP(
     "POS Printer",
     instructions=(
-        "POS thermal printer server with 4 tools: "
-        "print_text (formatted text), "
-        "print_image (base64 images), "
-        "print_diagram (graphviz/matplotlib diagrams), "
-        "print_barcode (QR codes and barcodes). "
-        "All tools support a preview mode that returns an image instead of printing."
+        "Thermal printer server with 4 tools (print_text, print_image, "
+        "print_diagram, print_barcode). Each accepts mode='print' (default), "
+        "'preview' (returns image without printing), or 'confirm' (opens a "
+        "browser preview and waits for user approval — supports basic edits). "
+        "Text auto-promotes to bitmap rendering for non-ASCII content so the "
+        "browser preview matches the printed output exactly."
     ),
 )
 
 
 def _load_cfg() -> PrinterConfig:
-    return load_config(CONFIG_PATH)
+    global _CFG_CACHE, _CFG_CACHE_KEY
+    if _CFG_CACHE is None or _CFG_CACHE_KEY != CONFIG_PATH:
+        _CFG_CACHE = load_config(CONFIG_PATH)
+        _CFG_CACHE_KEY = CONFIG_PATH
+    return _CFG_CACHE
+
+
+def reset_config_cache() -> None:
+    global _CFG_CACHE, _CFG_CACHE_KEY
+    _CFG_CACHE = None
+    _CFG_CACHE_KEY = None
+
+
+def _ensure_preview_started(cfg: PrinterConfig) -> None:
+    global _PREVIEW_STARTED
+    if _PREVIEW_STARTED or not cfg.preview.enabled:
+        return
+    from pos_mcp import preview_server
+    url = preview_server.start(
+        host=cfg.preview.host,
+        port=cfg.preview.port,
+        auto_open=cfg.preview.auto_open,
+    )
+    log.info("Preview server: %s", url)
+    _PREVIEW_STARTED = True
+
+
+def _image_content(img) -> list:
+    return [ImageContent(type="image", data=preview_image(img), mimeType="image/png")]
+
+
+def _await_confirmation(
+    kind: str,
+    params: dict[str, Any],
+    image,
+    rerender,
+    cfg: PrinterConfig,
+) -> tuple[str, Any]:
+    """Submit job to store, block on user decision. Returns (decision, job)."""
+    _ensure_preview_started(cfg)
+    store = get_store()
+    job = store.create(kind=kind, params=params, image=image, rerender=rerender)
+    log.info("Job %s awaiting confirmation at http://%s:%s",
+             job.id, cfg.preview.host, cfg.preview.port)
+    got = job.wait(timeout=cfg.preview.confirm_timeout)
+    if not got:
+        store.cancel(job.id)
+        return ("timeout", job)
+    return (job.decision or "cancel", job)
+
+
+def _normalize_mode(mode: str, preview: bool) -> str:
+    if preview:
+        return "preview"
+    if mode not in ("print", "preview", "confirm"):
+        return "print"
+    return mode
 
 
 @mcp.tool()
@@ -33,25 +106,70 @@ def print_text(
     size: str = "normal",
     align: str = "left",
     cut: bool = True,
+    render: Literal["auto", "native", "bitmap"] = "auto",
+    mode: Literal["print", "preview", "confirm"] = "print",
     preview: bool = False,
 ) -> str | list:
-    """Print formatted text to the thermal printer.
+    """Print formatted text. Auto-renders as bitmap when content has non-ASCII chars.
 
     Args:
         content: The text content to print.
-        bold: Whether to use bold font.
-        size: Font size — "small", "normal", or "large".
-        align: Text alignment — "left", "center", or "right".
-        cut: Whether to cut the paper after printing.
-        preview: If True, return a preview image instead of printing.
+        bold: Bold font.
+        size: "small", "normal", or "large".
+        align: "left", "center", or "right".
+        cut: Cut paper after printing.
+        render: "auto" picks native or bitmap based on content; "native" forces
+            the printer font (ASCII only); "bitmap" forces graphical rendering
+            for full Unicode + emoji support and pixel-perfect preview.
+        mode: "print" sends to printer; "preview" returns image; "confirm" opens
+            a browser preview and waits for the user to approve, cancel, or edit.
+        preview: Deprecated. Use mode="preview" instead. Kept for compatibility.
     """
     cfg = _load_cfg()
+    effective_mode = _normalize_mode(mode, preview)
+    use_bitmap = should_use_bitmap(content, force=render)
 
-    if preview:
-        img = render_text(content, width_px=cfg.width_px, bold=bold, size=size, align=align)
-        b64 = preview_image(img)
-        return [ImageContent(type="image", data=b64, mimeType="image/png")]
+    def render_preview_img(params: dict[str, Any]):
+        if should_use_bitmap(params["content"], force=render):
+            return render_text(
+                params["content"],
+                width_px=cfg.width_px,
+                bold=params.get("bold", bold),
+                size=params.get("size", size),
+                align=params.get("align", align),
+                font_chain=cfg.fonts.fallback_chain or None,
+            )
+        return render_native_preview(
+            params["content"],
+            width_px=cfg.width_px,
+            bold=params.get("bold", bold),
+            size=params.get("size", size),
+            align=params.get("align", align),
+        )
 
+    initial_params = {"content": content, "bold": bold, "size": size, "align": align}
+    img = render_preview_img(initial_params)
+
+    if effective_mode == "preview":
+        return _image_content(img)
+
+    if effective_mode == "confirm":
+        decision, job = _await_confirmation("text", initial_params, img, render_preview_img, cfg)
+        if decision != "print":
+            return f"Cancelled by user ({decision})"
+        params = {**initial_params, **(job.edited_params or {})}
+        final_use_bitmap = should_use_bitmap(params["content"], force=render)
+        if final_use_bitmap:
+            return send_to_printer(cfg, image=job.image, cut=cut)
+        return send_to_printer(
+            cfg,
+            text=params["content"] + "\n",
+            text_options={"bold": params["bold"], "size": params["size"], "align": params["align"]},
+            cut=cut,
+        )
+
+    if use_bitmap:
+        return send_to_printer(cfg, image=img, cut=cut)
     return send_to_printer(
         cfg,
         text=content + "\n",
@@ -65,22 +183,36 @@ def print_image(
     image_base64: str,
     dither: bool = True,
     cut: bool = True,
+    mode: Literal["print", "preview", "confirm"] = "print",
     preview: bool = False,
 ) -> str | list:
-    """Print a base64-encoded image to the thermal printer.
+    """Print a base64-encoded image.
 
     Args:
-        image_base64: Base64-encoded image data.
-        dither: Whether to apply Floyd-Steinberg dithering.
-        cut: Whether to cut the paper after printing.
-        preview: If True, return a preview image instead of printing.
+        image_base64: Base64 PNG or JPG.
+        dither: Floyd-Steinberg dithering for 1-bit conversion.
+        cut: Cut paper after printing.
+        mode: "print" / "preview" / "confirm" (see print_text for details).
+        preview: Deprecated alias for mode="preview".
     """
     cfg = _load_cfg()
-    img = prepare_image(image_base64, width_px=cfg.width_px, dither=dither)
+    effective_mode = _normalize_mode(mode, preview)
 
-    if preview:
-        b64 = preview_image(img)
-        return [ImageContent(type="image", data=b64, mimeType="image/png")]
+    def render_preview_img(params: dict[str, Any]):
+        return prepare_image(image_base64, width_px=cfg.width_px, dither=params.get("dither", dither))
+
+    img = render_preview_img({"dither": dither})
+
+    if effective_mode == "preview":
+        return _image_content(img)
+
+    if effective_mode == "confirm":
+        decision, job = _await_confirmation(
+            "image", {"dither": dither}, img, render_preview_img, cfg
+        )
+        if decision != "print":
+            return f"Cancelled by user ({decision})"
+        return send_to_printer(cfg, image=job.image, cut=cut)
 
     return send_to_printer(cfg, image=img, cut=cut)
 
@@ -88,19 +220,22 @@ def print_image(
 @mcp.tool()
 def print_diagram(
     code: str,
-    engine: str = "graphviz",
+    engine: Literal["graphviz", "matplotlib"] = "graphviz",
     cut: bool = True,
+    mode: Literal["print", "preview", "confirm"] = "print",
     preview: bool = False,
 ) -> str | list:
-    """Print a diagram rendered from code to the thermal printer.
+    """Print a diagram from DOT or matplotlib code.
 
     Args:
-        code: Source code for the diagram (DOT for graphviz, Python for matplotlib).
-        engine: Rendering engine — "graphviz" or "matplotlib".
-        cut: Whether to cut the paper after printing.
-        preview: If True, return a preview image instead of printing.
+        code: DOT source (graphviz) or Python source (matplotlib).
+        engine: "graphviz" or "matplotlib".
+        cut: Cut paper after printing.
+        mode: "print" / "preview" / "confirm".
+        preview: Deprecated alias for mode="preview".
     """
     cfg = _load_cfg()
+    effective_mode = _normalize_mode(mode, preview)
 
     if engine == "graphviz":
         img = render_dot(code, width_px=cfg.width_px)
@@ -109,9 +244,16 @@ def print_diagram(
     else:
         raise ValueError(f"Unknown engine: {engine}. Use 'graphviz' or 'matplotlib'.")
 
-    if preview:
-        b64 = preview_image(img)
-        return [ImageContent(type="image", data=b64, mimeType="image/png")]
+    if effective_mode == "preview":
+        return _image_content(img)
+
+    if effective_mode == "confirm":
+        decision, job = _await_confirmation(
+            "diagram", {"engine": engine}, img, rerender=None, cfg=cfg
+        )
+        if decision != "print":
+            return f"Cancelled by user ({decision})"
+        return send_to_printer(cfg, image=job.image, cut=cut)
 
     return send_to_printer(cfg, image=img, cut=cut)
 
@@ -122,44 +264,40 @@ def print_barcode(
     type: str = "qr",
     label: str = "",
     cut: bool = True,
+    mode: Literal["print", "preview", "confirm"] = "print",
     preview: bool = False,
 ) -> str | list:
-    """Print a barcode or QR code to the thermal printer.
+    """Print a QR code or linear barcode.
 
     Args:
-        data: The data to encode in the barcode.
-        type: Barcode type — "qr", "ean13", "code128", etc.
-        label: Optional label text to print below the barcode.
-        cut: Whether to cut the paper after printing.
-        preview: If True, return a preview image instead of printing.
+        data: Data to encode.
+        type: "qr", "ean13", "ean8", "code128", "code39".
+        label: Optional text label printed alongside.
+        cut: Cut paper after printing.
+        mode: "print" / "preview" / "confirm".
+        preview: Deprecated alias for mode="preview".
     """
     cfg = _load_cfg()
+    effective_mode = _normalize_mode(mode, preview)
 
-    if preview:
-        if type == "qr":
-            import qrcode
+    img = _render_barcode_image(data, type, cfg.width_px)
 
-            qr = qrcode.QRCode(box_size=10, border=2)
-            qr.add_data(data)
-            qr.make(fit=True)
-            img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-            img = img.resize((cfg.width_px, cfg.width_px))
-            img = img.convert("1")
-        else:
-            import barcode as barcode_lib
-            from barcode.writer import ImageWriter
+    if effective_mode == "preview":
+        return _image_content(img)
 
-            bc_class = barcode_lib.get_barcode_class(type)
-            bc = bc_class(data, writer=ImageWriter())
-            buf = bc.render()
-            img = buf.convert("RGB")
-            ratio = cfg.width_px / img.width
-            new_height = int(img.height * ratio)
-            img = img.resize((cfg.width_px, new_height))
-            img = img.convert("1")
-
-        b64 = preview_image(img)
-        return [ImageContent(type="image", data=b64, mimeType="image/png")]
+    if effective_mode == "confirm":
+        decision, job = _await_confirmation(
+            "barcode", {"data": data, "type": type, "label": label}, img, rerender=None, cfg=cfg
+        )
+        if decision != "print":
+            return f"Cancelled by user ({decision})"
+        return send_to_printer(
+            cfg,
+            barcode_data=data,
+            barcode_type=type,
+            barcode_label=label,
+            cut=cut,
+        )
 
     return send_to_printer(
         cfg,
@@ -170,7 +308,32 @@ def print_barcode(
     )
 
 
+def _render_barcode_image(data: str, type: str, width_px: int):
+    if type == "qr":
+        import qrcode
+        qr = qrcode.QRCode(box_size=10, border=2)
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        img = img.resize((width_px, width_px))
+        return img.convert("1")
+
+    import barcode as barcode_lib
+    from barcode.writer import ImageWriter
+    bc_class = barcode_lib.get_barcode_class(type)
+    bc = bc_class(data, writer=ImageWriter())
+    buf = bc.render()
+    img = buf.convert("RGB")
+    ratio = width_px / img.width
+    new_h = int(img.height * ratio)
+    return img.resize((width_px, new_h)).convert("1")
+
+
 def main():
+    global CONFIG_PATH
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    if CONFIG_PATH is None:
+        CONFIG_PATH = Path(__file__).parent.parent.parent / "pos-mcp.json"
     mcp.run(transport="stdio")
 
 
